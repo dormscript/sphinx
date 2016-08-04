@@ -1564,6 +1564,8 @@ bool SendRotate ( const CSphConfig & hConf, bool bForce )
 
 int main ( int argc, char ** argv )
 {
+	printf("hello word\n");
+	return 0;
 	const char * sOptConfig = NULL;
 	bool bMerge = false;
 	CSphVector<CSphFilterSettings> dMergeDstFilters;
@@ -1846,7 +1848,9 @@ int main ( int argc, char ** argv )
 	// index each index
 	////////////////////
 
-	FILE * fpDumpRows = NULL;
+	FILE * fpDumpRows = N
+
+	ULL;
 	if ( !bMerge && !sDumpRows.IsEmpty() )
 	{
 		fpDumpRows = fopen ( sDumpRows.cstr(), "wb+" );
