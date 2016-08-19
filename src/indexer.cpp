@@ -1155,7 +1155,6 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 		SafeDelete ( pTokenizer );
 
 		bOK = true;
-
 	} else
 	{
 		//////////
@@ -1170,12 +1169,15 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 		CSphIndex * pIndex = sphCreateIndexPhrase ( sIndexName, sIndexPath.cstr() );
 		assert ( pIndex );
 
+printf("helo\n");
+
 		// check lock file
 		if ( !pIndex->Lock() )
 		{
 			fprintf ( stdout, "FATAL: %s, will not index. Try --rotate option.\n", pIndex->GetLastError().cstr() );
 			exit ( 1 );
 		}
+		 
 
 		tSettings.m_bVerbose = bVerbose;
 
@@ -1219,7 +1221,10 @@ bool DoIndex ( const CSphConfigSection & hIndex, const char * sIndexName,
 		}
 		pIndex->Setup ( tSettings );
 
+
 		bOK = pIndex->Build ( dSources, g_iMemLimit, g_iWriteBuffer )!=0;
+		printf("helo\n");
+		return 1;
 		if ( bOK && g_bRotate && g_bSendHUP )
 		{
 			sIndexPath.SetSprintf ( "%s.new", hIndex["path"].cstr() );
@@ -1564,8 +1569,6 @@ bool SendRotate ( const CSphConfig & hConf, bool bForce )
 
 int main ( int argc, char ** argv )
 {
-	printf("hello word\n");
-	return 0;
 	const char * sOptConfig = NULL;
 	bool bMerge = false;
 	CSphVector<CSphFilterSettings> dMergeDstFilters;
@@ -1848,9 +1851,7 @@ int main ( int argc, char ** argv )
 	// index each index
 	////////////////////
 
-	FILE * fpDumpRows = N
-
-	ULL;
+	FILE * fpDumpRows = NULL;
 	if ( !bMerge && !sDumpRows.IsEmpty() )
 	{
 		fpDumpRows = fopen ( sDumpRows.cstr(), "wb+" );
@@ -1918,6 +1919,7 @@ int main ( int argc, char ** argv )
 			else
 			{
 				bool bLastOk = DoIndex ( hConf["index"][dIndexes[j]], dIndexes[j], hConf["source"], bVerbose, fpDumpRows );
+				
 				if ( bLastOk && ( sphMicroTimer() - tmRotated > ROTATE_MIN_INTERVAL ) && g_bSendHUP && SendRotate ( hConf, false ) )
 					tmRotated = sphMicroTimer();
 				if ( bLastOk )
@@ -1963,7 +1965,6 @@ int main ( int argc, char ** argv )
 #if SPH_DEBUG_LEAKS
 	sphAllocsStats ();
 #endif
-
 	return iExitCode;
 }
 

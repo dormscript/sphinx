@@ -56,11 +56,38 @@ sphinx系统由多个可执行程序和一套api组成。
 	
 		1：indexer的参数验证
 		2：pIndex->build()
-		3:
+		3: build函数一共1500行，目标是读懂sp*的几个文件存储格式，然而并没有读完
+	** 暂时进入下一个流程 **
 
 
-源码阅读小技巧：
-	1：首先要了解全文检索的原理  推荐 《这就是搜索引擎》 https://www.amazon.cn/%E8%BF%99%E5%B0%B1%E6%98%AF%E6%90%9C%E7%B4%A2%E5%BC%95%E6%93%8E-%E6%A0%B8%E5%BF%83%E6%8A%80%E6%9C%AF%E8%AF%A6%E8%A7%A3-%E5%BC%A0%E4%BF%8A%E6%9E%97/dp/B006J9MSD8/
+## search 功能分析
+	
+* 调试方法
+	* make searchd
+	* ./searchd --config ../sphinx-min.conf.dist 
+		# 启动search服务
+	* mysql -h 127.0.0.1 -P 9306
+		# 连接查询服务
+	* select * from test1 where match('another');
+		# 测试查询语句
+	* ./searchd --config ../sphinx-min.conf.dist --stop	
+
+* 从main函数入口，分析代码
+	
+	* 各种初始化后进入ServiceMain
+	* 判断系统信息，获取传入参数，读pid
+	* 监听端口，HandleClient处理请求
+	* HandleClient： 与客户端交换版本号
+	* LoopClientSphinx
+
+
+	
+
+
+
+##源码阅读小技巧：
+	
+	* 1：首先要了解全文检索的原理  推荐 [《这就是搜索引擎》](https://www.amazon.cn/%E8%BF%99%E5%B0%B1%E6%98%AF%E6%90%9C%E7%B4%A2%E5%BC%95%E6%93%8E-%E6%A0%B8%E5%BF%83%E6%8A%80%E6%9C%AF%E8%AF%A6%E8%A7%A3-%E5%BC%A0%E4%BF%8A%E6%9E%97/dp/B006J9MSD8/) 	
 
 	2：阅读代码时如果遇到不明确的数据结构，尽量快速理解，不要过分的深入分析，只要理解其功能
 	
