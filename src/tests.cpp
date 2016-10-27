@@ -3838,6 +3838,42 @@ void TestSource ()
 		"10,ma\\\"tch,me,ten\\\"der,tmp,tmp,tmp,11\n",
 		"ma\"tch", "me", "ten\"der", "tmp", "tmp", "tmp",
 
+		"11,"
+		"test fest \\\" best"
+		",tmp,tmp,tmp,tmp,tmp,11\n",
+		"test fest \" best",
+		"tmp", "tmp", "tmp", "tmp", "tmp",
+
+		"12,"
+		"\"test fest \\\" be\"st\""
+		",tmp,tmp,tmp,tmp,tmp,11\n",
+		"test fest \\ be\"st\"",
+		"tmp", "tmp", "tmp", "tmp", "tmp",
+
+		"13,"
+		"\"test fest, be\"st of, the\""
+		",tmp,tmp,tmp,tmp,11\n",
+		"test fest, best of", " the\"",
+		"tmp", "tmp", "tmp", "tmp",
+
+		"14,"
+		"\"test fest, best of, th\"e"
+		",tmp,tmp,tmp,tmp,tmp,11\n",
+		"test fest, best of, the",
+		"tmp", "tmp", "tmp", "tmp", "tmp",
+
+		"15,"
+		"\"test fest\\, best of th\"e"
+		",tmp,tmp,tmp,tmp,tmp,11\n",
+		"test fest\\, best of the",
+		"tmp", "tmp", "tmp", "tmp", "tmp",
+
+		"16,"
+		"test \"fest\\, best of th\"e"
+		",tmp,tmp,tmp,tmp,11\n",
+		"test \"fest", " best of th\"e",
+		"tmp", "tmp", "tmp", "tmp",
+
 		NULL };
 
 	// write csv file
@@ -4101,46 +4137,46 @@ void TestTDigest()
 	printf ( "testing t-digest... " );
 
 	{
-		sphSrand(0);
+		sphSrand ( 0 );
 
 		// simple
 		CSphScopedPtr<TDigest_i> pDigest ( sphCreateTDigest() );
 
-		for ( int i = 1; i <= 100; i++ )
+		for ( int i=1; i<=100; i++ )
 			pDigest->Add ( i, 1 );
 
-		Verify ( pDigest->Percentile(50)==51 );
-		Verify ( pDigest->Percentile(95)==96 );
-		Verify ( pDigest->Percentile(99)==100 );
+		Verify ( fabs ( (double)pDigest->Percentile(50)-51 )<=1.0 );
+		Verify ( fabs ( (double)pDigest->Percentile(95)-96 )<=1.0 );
+		Verify ( fabs ( (double)pDigest->Percentile(99)-100 )<=1.0 );
 	}
 
 	{
-		sphSrand(0);
+		sphSrand ( 0 );
 
 		// dupes
 		CSphScopedPtr<TDigest_i> pDigest ( sphCreateTDigest() );
 
-		for ( int j = 0; j < 3; j++ )
-			for ( int i = 0; i < 10000; i++ )
+		for ( int j=0; j<3; j++ )
+			for ( int i=0; i<10000; i++ )
 				pDigest->Add ( i/100 + 1, 1 );
 
-		Verify ( fabs ( (double)pDigest->Percentile(50)-51 ) <= 1.0 );
-		Verify ( fabs ( (double)pDigest->Percentile(95)-96 ) <= 1.0 );
-		Verify ( fabs ( (double)pDigest->Percentile(99)-100 ) <= 1.0 );
+		Verify ( fabs ( (double)pDigest->Percentile(50)-51 )<=1.0 );
+		Verify ( fabs ( (double)pDigest->Percentile(95)-96 )<=1.0 );
+		Verify ( fabs ( (double)pDigest->Percentile(99)-100 )<=1.0 );
 	}
 
 	{
-		sphSrand(0);
+		sphSrand ( 0 );
 
 		// compression
 		CSphScopedPtr<TDigest_i> pDigest ( sphCreateTDigest() );
 
-		for ( int i = 0; i < 10000; i++ )
+		for ( int i=0; i<10000; i++ )
 			pDigest->Add ( i + 1, 1 );
 
-		Verify ( fabs ( (double)pDigest->Percentile(50)-5001 ) <= 1.0 );
-		Verify ( fabs ( (double)pDigest->Percentile(95)-9501 ) <= 1.0 );
-		Verify ( fabs ( (double)pDigest->Percentile(99)-9901 ) <= 1.0 );
+		Verify ( fabs ( (double)pDigest->Percentile(50)-5001 )<=1.5 );
+		Verify ( fabs ( (double)pDigest->Percentile(95)-9501 )<=1.5 );
+		Verify ( fabs ( (double)pDigest->Percentile(99)-9901 )<=1.5 );
 	}
 
 	printf ( "ok\n" );

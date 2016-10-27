@@ -85,7 +85,7 @@ struct CSphMemHeader
 	CSphMemHeader *	m_pPrev;
 };
 
-static CSphStaticMutex	g_tAllocsMutex;
+static CSphMutex		g_tAllocsMutex;
 
 static int				g_iCurAllocs	= 0;
 static int				g_iAllocsId		= 0;
@@ -341,7 +341,7 @@ void operator delete [] ( void * pPtr )
 
 #undef new
 
-static CSphStaticMutex	g_tAllocsMutex;
+static CSphMutex		g_tAllocsMutex;
 static int				g_iAllocsId		= 0;
 static int				g_iCurAllocs	= 0;
 static int64_t			g_iCurBytes		= 0;
@@ -1170,7 +1170,7 @@ CSphSemaphore::~CSphSemaphore ()
 	assert ( !m_bInitialized );
 }
 
-bool CSphSemaphore::Init(const char*)
+bool CSphSemaphore::Init ( const char * )
 {
 	assert ( !m_bInitialized );
 	m_hSem = CreateSemaphore ( NULL, 0, INT_MAX, NULL );
@@ -1204,24 +1204,27 @@ bool CSphSemaphore::Wait()
 
 // UNIX mutex implementation
 
-CSphMutex::CSphMutex() {
-	if ( pthread_mutex_init ( &m_tMutex, NULL ) )
+CSphMutex::CSphMutex()
+{
+	m_pMutex = new pthread_mutex_t;
+	if ( pthread_mutex_init ( m_pMutex, NULL ) )
 		sphDie ( "pthread_mutex_init() failed %s", strerror ( errno ) );
 }
 
-CSphMutex::~CSphMutex() {
-	if ( pthread_mutex_destroy ( &m_tMutex ) )
+CSphMutex::~CSphMutex()
+{
+	if ( pthread_mutex_destroy ( m_pMutex ) )
 		sphDie ( "pthread_mutex_destroy() failed %s", strerror ( errno ) );
+	SafeDelete ( m_pMutex );
 }
 
 bool CSphMutex::Lock ()
 {
-	return ( pthread_mutex_lock ( &m_tMutex )==0 );
+	return ( pthread_mutex_lock ( m_pMutex )==0 );
 }
 
 bool CSphMutex::TimedLock ( int iMsec )
 {
-
 // pthread_mutex_timedlock is not available on Mac Os. Fallback to lock without a timer.
 #if defined (HAVE_PTHREAD_MUTEX_TIMEDLOCK)
 	struct timespec ts;
@@ -1231,7 +1234,7 @@ bool CSphMutex::TimedLock ( int iMsec )
 	ts.tv_sec += ( ns / 1000000000 ) + ( iMsec / 1000 );
 	ts.tv_nsec = ( ns % 1000000000 );
 
-	int iRes = pthread_mutex_timedlock ( &m_tMutex, &ts );
+	int iRes = pthread_mutex_timedlock ( m_pMutex, &ts );
 	return iRes==0;
 
 #else
@@ -1239,13 +1242,13 @@ bool CSphMutex::TimedLock ( int iMsec )
 	int64_t tmTill = sphMicroTimer () + iMsec;
 	do
 	{
-		iRes = pthread_mutex_trylock ( &m_tMutex );
+		iRes = pthread_mutex_trylock ( m_pMutex );
 		if ( iRes!=EBUSY )
 			break;
 		sphSleepMsec ( 1 );
 	} while ( sphMicroTimer ()<tmTill );
 	if ( iRes==EBUSY )
-		iRes = pthread_mutex_trylock ( &m_tMutex );
+		iRes = pthread_mutex_trylock ( m_pMutex );
 
 	return iRes!=EBUSY;
 
@@ -1254,7 +1257,7 @@ bool CSphMutex::TimedLock ( int iMsec )
 
 bool CSphMutex::Unlock ()
 {
-	return ( pthread_mutex_unlock ( &m_tMutex )==0 );
+	return ( pthread_mutex_unlock ( m_pMutex )==0 );
 }
 
 bool CSphAutoEvent::Init ( CSphMutex * pMutex )
@@ -1313,10 +1316,10 @@ CSphSemaphore::~CSphSemaphore ()
 }
 
 
-bool CSphSemaphore::Init (const char* sName)
+bool CSphSemaphore::Init ( const char * sName )
 {
 	assert ( !m_bInitialized );
-	m_pSem = sem_open (sName, O_CREAT, 0, 0);
+	m_pSem = sem_open ( sName, O_CREAT, 0, 0 );
 	m_sName = sName;
 	m_bInitialized = ( m_pSem!=SEM_FAILED );
 	return m_bInitialized;
@@ -1329,7 +1332,7 @@ bool CSphSemaphore::Done ()
 
 	m_bInitialized = false;
 	int iRes = sem_close ( m_pSem );
-	sem_unlink (m_sName.cstr());
+	sem_unlink ( m_sName.cstr() );
 	return ( iRes==0 );
 }
 
@@ -1480,17 +1483,20 @@ bool CSphRwlock::Unlock ()
 
 CSphRwlock::CSphRwlock ()
 	: m_bInitialized ( false )
-{}
+{
+	m_pLock = new pthread_rwlock_t;
+}
 
 bool CSphRwlock::Init ( bool bPreferWriter )
 {
 	assert ( !m_bInitialized );
+	assert ( m_pLock );
 
 	pthread_rwlockattr_t tAttr;
 	pthread_rwlockattr_t * pAttr = NULL;
 
 // Mac OS X knows nothing about PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP
-#ifdef PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP
+#ifndef __APPLE__
 	while ( bPreferWriter )
 	{
 		bool bOk = ( pthread_rwlockattr_init ( &tAttr )==0 );
@@ -1510,7 +1516,7 @@ bool CSphRwlock::Init ( bool bPreferWriter )
 		break;
 	}
 #endif
-	m_bInitialized = ( pthread_rwlock_init ( &m_tLock, pAttr )==0 );
+	m_bInitialized = ( pthread_rwlock_init ( m_pLock, pAttr )==0 );
 
 	if ( pAttr )
 		pthread_rwlockattr_destroy ( &tAttr );
@@ -1520,32 +1526,36 @@ bool CSphRwlock::Init ( bool bPreferWriter )
 
 bool CSphRwlock::Done ()
 {
+	assert ( m_pLock );
 	if ( !m_bInitialized )
 		return true;
 
-	m_bInitialized = !( pthread_rwlock_destroy ( &m_tLock )==0 );
+	m_bInitialized = !( pthread_rwlock_destroy ( m_pLock )==0 );
 	return !m_bInitialized;
 }
 
 bool CSphRwlock::ReadLock ()
 {
 	assert ( m_bInitialized );
+	assert ( m_pLock );
 
-	return pthread_rwlock_rdlock ( &m_tLock )==0;
+	return pthread_rwlock_rdlock ( m_pLock )==0;
 }
 
 bool CSphRwlock::WriteLock ()
 {
 	assert ( m_bInitialized );
+	assert ( m_pLock );
 
-	return pthread_rwlock_wrlock ( &m_tLock )==0;
+	return pthread_rwlock_wrlock ( m_pLock )==0;
 }
 
 bool CSphRwlock::Unlock ()
 {
 	assert ( m_bInitialized );
+	assert ( m_pLock );
 
-	return pthread_rwlock_unlock ( &m_tLock )==0;
+	return pthread_rwlock_unlock ( m_pLock )==0;
 }
 
 #endif
@@ -1770,6 +1780,19 @@ template<> void CSphAtomic_T<int64_t>::SetValue ( int64_t iValue )
 	assert ( ( ( (size_t) &m_iValue )%( sizeof ( &m_iValue ) ) )==0 && "unaligned atomic!" );
 	InterlockedExchange64 ( &m_iValue, iValue );
 }
+
+template<> long CSphAtomic_T<long>::CAS ( long iOldVal, long iNewVal )
+{
+	assert ( ( ( (size_t) &m_iValue )%( sizeof ( &m_iValue ) ) )==0 && "unaligned atomic!" );
+	return InterlockedCompareExchange ( &m_iValue, iNewVal, iOldVal );
+}
+
+template<> int64_t CSphAtomic_T<int64_t>::CAS ( int64_t iOldVal, int64_t iNewVal )
+{
+	assert ( ( ( (size_t) &m_iValue )%( sizeof ( &m_iValue ) ) )==0 && "unaligned atomic!" );
+	return InterlockedCompareExchange64 ( &m_iValue, iNewVal, iOldVal );
+}
+
 #endif
 
 // fast check if we are built with right endianess settings
@@ -1848,7 +1871,7 @@ public:
 		, m_bShutdown ( false )
 		, m_iStatQueuedJobs ( 0 )
 	{
-		Verify ( m_tWorkSem.Init (sName) );
+		Verify ( m_tWorkSem.Init ( sName ) );
 
 		iThreads = Max ( iThreads, 1 );
 		m_dWorkers.Reset ( iThreads );
@@ -2028,7 +2051,7 @@ public:
 		Reset();
 	}
 
-	virtual void Add ( double fValue, int iWeight = 1 )
+	virtual void Add ( double fValue, int64_t iWeight = 1 )
 	{
 		if ( m_dMap.empty() )
 		{
@@ -2075,10 +2098,10 @@ public:
 			double fQuantile = m_iCount==1 ? 0.5 : (iSum + (i->second - 1) / 2.0) / (m_iCount - 1);
 			double fThresh = 4.0 * m_iCount * fQuantile * (1 - fQuantile) / COMPRESSION;
 
-			if ( i->second + iWeight <= fThresh )
+			if ( i->second+iWeight<=fThresh )
 			{
 				iN++;
-				if ( ( double (sphRand()) / UINT_MAX ) < 1.0/iN )
+				if ( ( double ( sphRand() ) / UINT_MAX )<1.0/iN )
 					tClosest = i;
 			}
 
@@ -2091,9 +2114,8 @@ public:
 		{
 			double fNewMean = WeightedAvg ( tClosest->first, tClosest->second, fValue, iWeight );
 			int64_t iNewCount = tClosest->second+iWeight;
-			m_dMap.erase(tClosest);
+			m_dMap.erase ( tClosest );
 			m_dMap.insert ( std::pair<double, int64_t> ( fNewMean, iNewCount ) );
-
 		}
 
 		m_iCount += iWeight;
@@ -2112,7 +2134,7 @@ public:
 			return 0.0;
 
 		int64_t iTotalCount = 0;
-		double fPercent = double(iPercent) / 100.0;
+		double fPercent = double ( iPercent ) / 100.0;
 		fPercent *= m_iCount;
 
 		auto iMapFirst = m_dMap.begin();
@@ -2124,7 +2146,7 @@ public:
 			if ( fPercent < iTotalCount + i->second )
 			{
 				if ( i==iMapFirst || i==iMapLast )
-					return uint64_t(i->first+0.5);
+					return i->first;
 				else
 				{
 					// get mean from previous iterator; get mean from next iterator; calc delta

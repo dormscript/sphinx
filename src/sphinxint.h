@@ -1969,8 +1969,9 @@ struct SuggestArgs_t
 
 	bool			m_bResultOneline;
 	bool			m_bResultStats;
+	bool			m_bNonCharAllowed;
 
-	SuggestArgs_t () : m_iLimit ( 5 ), m_iMaxEdits ( 4 ), m_iDeltaLen ( 3 ), m_iQueueLen ( 25 ), m_iRejectThr ( 4 ), m_bQueryMode ( false ), m_bResultOneline ( false ), m_bResultStats ( true )
+	SuggestArgs_t () : m_iLimit ( 5 ), m_iMaxEdits ( 4 ), m_iDeltaLen ( 3 ), m_iQueueLen ( 25 ), m_iRejectThr ( 4 ), m_bQueryMode ( false ), m_bResultOneline ( false ), m_bResultStats ( true ), m_bNonCharAllowed ( false )
 	{}
 };
 
@@ -1992,8 +1993,9 @@ struct SuggestResult_t
 	int				m_dCodepoints[SPH_MAX_WORD_LEN];
 	int				m_iCodepoints;
 	bool			m_bUtf8;
+	bool			m_bHasExactDict;
 
-	SuggestResult_t () : m_pWordReader ( NULL ), m_pSegments ( NULL ), m_bMergeWords ( false ), m_iLen ( 0 ), m_iCodepoints ( 0 ), m_bUtf8 ( false )
+	SuggestResult_t () : m_pWordReader ( NULL ), m_pSegments ( NULL ), m_bMergeWords ( false ), m_iLen ( 0 ), m_iCodepoints ( 0 ), m_bUtf8 ( false ), m_bHasExactDict ( false )
 	{
 		m_dBuf.Reserve ( 8096 );
 		m_dMatched.Reserve ( 512 );

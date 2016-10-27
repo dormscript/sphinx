@@ -169,6 +169,8 @@ bool			sphFixupIndexSettings ( CSphIndex * pIndex, const CSphConfigSection & hIn
 
 bool			sphInitCharsetAliasTable ( CSphString & sError );
 
+const char * sphBigramName ( ESphBigram eType );
+
 enum ESphLogLevel
 {
 	SPH_LOG_FATAL	= 0,
@@ -193,17 +195,19 @@ void sphSetLogger ( SphLogger_fn fnLog );
 
 /// how do we properly exit from the crash handler?
 #if !USE_WINDOWS
+	#define CRASH_EXIT_CORE { signal ( sig, SIG_DFL ); kill ( getpid(), sig ); }
 	#ifndef NDEBUG
 		// UNIX debug build, die and dump core
-		#define CRASH_EXIT { signal ( sig, SIG_DFL ); kill ( getpid(), sig ); }
+		#define CRASH_EXIT CRASH_EXIT_CORE
 	#else
 		// UNIX release build, just die
 		#define CRASH_EXIT { exit ( 2 ); }
 	#endif
 #else
+	#define CRASH_EXIT_CORE return EXCEPTION_CONTINUE_SEARCH
 	#ifndef NDEBUG
 		// Windows debug build, show prompt to attach debugger
-		#define CRASH_EXIT return EXCEPTION_CONTINUE_SEARCH
+		#define CRASH_EXIT CRASH_EXIT_CORE
 	#else
 		// Windows release build, just die
 		#define CRASH_EXIT return EXCEPTION_EXECUTE_HANDLER

@@ -1365,7 +1365,7 @@ bool CSphTokenizerIndex::GetKeywords ( CSphVector <CSphKeywordInfo> & dKeywords,
 	if ( m_pFieldFilter && szQuery )
 	{
 		pFieldFilter = m_pFieldFilter->Clone();
-		if ( pFieldFilter->Apply ( sModifiedQuery, strlen ( (char*)sModifiedQuery ), dFiltered, true ) )
+		if ( pFieldFilter.Ptr() && pFieldFilter->Apply ( sModifiedQuery, strlen ( (char*)sModifiedQuery ), dFiltered, true ) )
 			sModifiedQuery = dFiltered.Begin();
 	}
 
@@ -1452,7 +1452,7 @@ public:
 
 	bool						EarlyReject ( CSphQueryContext * pCtx, CSphMatch & tMatch ) const;
 
-	virtual void				SetKeepAttrs ( const CSphString & sKeepAttrs ) { m_sKeepAttrs = sKeepAttrs; }
+	virtual void				SetKeepAttrs ( const CSphString & sKeepAttrs, const CSphVector<CSphString> & dAttrs ) { m_sKeepAttrs = sKeepAttrs; m_dKeepAttrs = dAttrs; }
 
 	virtual SphDocID_t *		GetKillList () const;
 	virtual int					GetKillListSize () const;
@@ -1478,6 +1478,7 @@ private:
 	SphDocID_t						m_uMinDocid;
 	CSphFixedVector<int64_t>		m_dFieldLens;	///< total per-field lengths summed over entire indexed data, in tokens
 	CSphString						m_sKeepAttrs;			///< retain attributes of that index reindexing
+	CSphVector<CSphString>			m_dKeepAttrs;
 
 private:
 
@@ -1534,7 +1535,7 @@ private:
 	const DWORD *				FindDocinfo ( SphDocID_t uDocID ) const;
 	void						CopyDocinfo ( const CSphQueryContext * pCtx, CSphMatch & tMatch, const DWORD * pFound ) const;
 
-	bool						BuildMVA ( const CSphVector<CSphSource*> & dSources, CSphFixedVector<CSphWordHit> & dHits, int iArenaSize, int iFieldFD, int nFieldMVAs, int iFieldMVAInPool, CSphIndex_VLN * pPrevIndex );
+	bool						BuildMVA ( const CSphVector<CSphSource*> & dSources, CSphFixedVector<CSphWordHit> & dHits, int iArenaSize, int iFieldFD, int nFieldMVAs, int iFieldMVAInPool, CSphIndex_VLN * pPrevIndex, const CSphBitvec * pPrevMva );
 
 	bool						IsStarDict() const;
 	CSphDict *					SetupStarDict ( CSphScopedPtr<CSphDict> & tContainer, CSphDict * pPrevDict ) const;
@@ -2521,7 +2522,6 @@ private:
 	int								m_iStart;
 	int								m_iOutputPending;
 	const CSphMultiform *			m_pCurrentForm;
-	const char *					m_szPendingBufferPtr;
 
 	bool				m_bBuildMultiform;
 	BYTE				m_sTokenizedMultiform [ 3*SPH_MAX_WORD_LEN+4 ];
@@ -5217,7 +5217,6 @@ CSphMultiformTokenizer::CSphMultiformTokenizer ( ISphTokenizer * pTokenizer, con
 	, m_iStart	( 0 )
 	, m_iOutputPending ( -1 )
 	, m_pCurrentForm ( NULL )
-	, m_szPendingBufferPtr ( NULL )
 	, m_bBuildMultiform	( false )
 {
 	assert ( pTokenizer && pContainer );
@@ -5239,16 +5238,11 @@ BYTE * CSphMultiformTokenizer::GetToken ()
 		if ( ++m_iOutputPending>=m_pCurrentForm->m_dNormalForm.GetLength() )
 		{
 			m_iOutputPending = -1;
-			m_szPendingBufferPtr = NULL;
 			m_pCurrentForm = NULL;
 		} else
 		{
-			bool bLastForm = ( m_iOutputPending==m_pCurrentForm->m_dNormalForm.GetLength()-1 );
-
 			StoredToken_t & tStart = m_dStoredTokens[m_iStart];
 			strncpy ( (char *)tStart.m_sToken, m_pCurrentForm->m_dNormalForm[m_iOutputPending].m_sForm.cstr(), sizeof(tStart.m_sToken) );
-			if ( bLastForm )
-				tStart.m_pBufferPtr = m_szPendingBufferPtr;
 
 			tStart.m_iTokenLen = m_pCurrentForm->m_dNormalForm[m_iOutputPending].m_iLengthCP;
 			tStart.m_bBoundary = false;
@@ -5389,7 +5383,7 @@ BYTE * CSphMultiformTokenizer::GetToken ()
 		if ( !bBlended )
 		{
 			// fold regular tokens to form
-			StoredToken_t & tStart = m_dStoredTokens[m_iStart];
+			const StoredToken_t & tStart = m_dStoredTokens[m_iStart];
 			StoredToken_t & tEnd = m_dStoredTokens[m_iStart+iFormTokCount];
 			m_iStart += iFormTokCount;
 
@@ -5405,8 +5399,6 @@ BYTE * CSphMultiformTokenizer::GetToken ()
 			if ( pCurForm->m_dNormalForm.GetLength()>1 )
 			{
 				m_iOutputPending = 0;
-				m_szPendingBufferPtr = tEnd.m_szTokenStart;
-				tEnd.m_pBufferPtr = m_szPendingBufferPtr;
 				m_pCurrentForm = pCurForm;
 			}
 		} else
@@ -8600,6 +8592,12 @@ bool CSphIndex::BuildDocList ( SphAttr_t ** ppDocList, int64_t * pCount, CSphStr
 	return true;
 }
 
+void CSphIndex::GetFieldFilterSettings ( CSphFieldFilterSettings & tSettings )
+{
+	if ( m_pFieldFilter )
+		m_pFieldFilter->GetSettings ( tSettings );
+}
+
 /////////////////////////////////////////////////////////////////////////////
 
 CSphIndex * sphCreateIndexPhrase ( const char* szIndexName, const char * sFilename )
@@ -8670,9 +8668,6 @@ int CSphIndex_VLN::UpdateAttributes ( const CSphAttrUpdate & tUpd, int iIndex, C
 	// check if we have to
 	if ( !m_iDocinfo || !uRows )
 		return 0;
-
-	if ( m_bBinlog && g_pBinlog )
-		g_pBinlog->BinlogUpdateAttributes ( &m_iTID, m_sIndexName.cstr(), tUpd );
 
 	// remap update schema to index schema
 	int iUpdLen = tUpd.m_dAttrs.GetLength();
@@ -9103,7 +9098,11 @@ int CSphIndex_VLN::UpdateAttributes ( const CSphAttrUpdate & tUpd, int iIndex, C
 		}
 	}
 
+	if ( uUpdateMask && m_bBinlog && g_pBinlog )
+		g_pBinlog->BinlogUpdateAttributes ( &m_iTID, m_sIndexName.cstr(), tUpd );
+
 	m_uAttrsStatus |= uUpdateMask; // FIXME! add lock/atomic?
+
 	return iUpdated;
 }
 
@@ -10841,7 +10840,7 @@ struct MvaEntryCmp_fn
 
 
 bool CSphIndex_VLN::BuildMVA ( const CSphVector<CSphSource*> & dSources, CSphFixedVector<CSphWordHit> & dHits,
-		int iArenaSize, int iFieldFD, int nFieldMVAs, int iFieldMVAInPool, CSphIndex_VLN * pPrevIndex )
+		int iArenaSize, int iFieldFD, int nFieldMVAs, int iFieldMVAInPool, CSphIndex_VLN * pPrevIndex, const CSphBitvec * pPrevMva )
 {
 	// initialize writer (data file must always exist)
 	CSphWriter wrMva;
@@ -10917,7 +10916,9 @@ bool CSphIndex_VLN::BuildMVA ( const CSphVector<CSphSource*> & dSources, CSphFix
 
 				while ( pSource->IterateMultivaluedNext () )
 				{
-					if ( pPrevIndex && pPrevIndex->FindDocinfo ( pSource->m_tDocInfo.m_uDocID ) )
+					// keep all mva from old index or
+					// keep only enumerated mva
+					if ( pPrevIndex && pPrevIndex->FindDocinfo ( pSource->m_tDocInfo.m_uDocID ) && ( !pPrevMva || ( pPrevMva && pPrevMva->BitGet ( iAttr ) ) ) )
 						continue;
 
 					pMva->m_uDocID = pSource->m_tDocInfo.m_uDocID;
@@ -11263,6 +11264,16 @@ private:
 	CSphVector<CSphAutofile*> m_dAutofiles;
 };
 
+static void CopyRow ( const CSphRowitem * pSrc, const ISphSchema & tSchema, const CSphVector<int> & dAttrs, CSphRowitem * pDst )
+{
+	assert ( pSrc && pDst );
+	ARRAY_FOREACH ( i, dAttrs )
+	{
+		const CSphAttrLocator & tLoc = tSchema.GetAttr ( dAttrs[i] ).m_tLocator;
+		SphAttr_t uVal = sphGetRowAttr ( pSrc, tLoc );
+		sphSetRowAttr ( pDst, tLoc, uVal );
+	}
+}
 
 int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemoryLimit, int iWriteBuffer )
 {
@@ -11469,6 +11480,11 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 	int nFieldMVAs = 0;
 
 	CSphScopedPtr<CSphIndex_VLN> pPrevIndex(NULL);
+	CSphVector<int>	dPrevAttrsPlain;
+	CSphBitvec dPrevAttrsMva;
+	CSphBitvec dPrevAttrsString;
+	bool bKeepSelectedAttrMva = false;
+	bool bKeepSelectedAttrString = false;
 	if ( !m_sKeepAttrs.IsEmpty() )
 	{
 		CSphString sWarning;
@@ -11494,6 +11510,38 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 				pPrevIndex.Reset();
 			}
 		}
+
+		if ( pPrevIndex.Ptr() && m_dKeepAttrs.GetLength() )
+		{
+			dPrevAttrsMva.Init ( m_tSchema.GetAttrsCount() );
+			dPrevAttrsString.Init ( m_tSchema.GetAttrsCount() );
+
+			ARRAY_FOREACH ( i, m_dKeepAttrs )
+			{
+				int iCol = m_tSchema.GetAttrIndex ( m_dKeepAttrs[i].cstr() );
+				if ( iCol==-1 )
+				{
+					sphWarn ( "no attribute found '%s'; ignoring --keep-attrs", m_dKeepAttrs[i].cstr() );
+					pPrevIndex.Reset();
+					break;
+				}
+
+				const CSphColumnInfo & tCol = m_tSchema.GetAttr ( iCol );
+				if ( tCol.m_eAttrType==SPH_ATTR_UINT32SET || tCol.m_eAttrType==SPH_ATTR_INT64SET )
+				{
+					dPrevAttrsMva.BitSet ( iCol );
+					bKeepSelectedAttrMva = true;
+				} else if ( tCol.m_eAttrType==SPH_ATTR_STRING || tCol.m_eAttrType==SPH_ATTR_JSON )
+				{
+					dPrevAttrsString.BitSet ( iCol );
+					bKeepSelectedAttrString = true;
+				} else
+				{
+					dPrevAttrsPlain.Add ( iCol );
+				}
+			}
+		}
+
 		if ( pPrevIndex.Ptr() )
 			pPrevIndex->Preread();
 	}
@@ -11646,16 +11694,20 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 			g_iIndexerCurrentDocID = pSource->m_tDocInfo.m_uDocID;
 			g_iIndexerCurrentHits = pHits-dHits.Begin();
 
-			DWORD * pPrevDocinfo = NULL;
+			const DWORD * pPrevDocinfo = NULL;
 			if ( m_tSettings.m_eDocinfo==SPH_DOCINFO_EXTERN && pPrevIndex.Ptr() )
-				pPrevDocinfo = const_cast<DWORD*>( pPrevIndex->FindDocinfo ( pSource->m_tDocInfo.m_uDocID ) );
+				pPrevDocinfo = pPrevIndex->FindDocinfo ( pSource->m_tDocInfo.m_uDocID );
 
 			if ( dMvaIndexes.GetLength() && pPrevDocinfo && pPrevIndex->m_tMva.GetWritePtr() )
 			{
 				// fetch old mva values
 				ARRAY_FOREACH ( i, dMvaIndexes )
 				{
-					const CSphColumnInfo & tCol = m_tSchema.GetAttr ( dMvaIndexes[i] );
+					int iAttr = dMvaIndexes[i];
+					if ( bKeepSelectedAttrMva && !dPrevAttrsMva.BitGet ( iAttr ) )
+						continue;
+
+					const CSphColumnInfo & tCol = m_tSchema.GetAttr ( iAttr );
 					SphAttr_t uOff = sphGetRowAttr ( DOCINFO2ATTRS ( pPrevDocinfo ), tCol.m_tLocator );
 					if ( !uOff )
 						continue;
@@ -11690,8 +11742,9 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 						}
 					}
 				}
+			}
 
-			} else if ( bHaveFieldMVAs )
+			if ( bHaveFieldMVAs )
 			{
 				// store field MVAs
 				ARRAY_FOREACH ( i, dFieldMvaIndexes )
@@ -11700,6 +11753,9 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 					int iMVA = dFieldMvaIndexes[i].m_iMVAAttr;
 					bool bMva64 = dFieldMvaIndexes[i].m_bMva64;
 					int iStep = ( bMva64 ? 2 : 1 );
+
+					if ( pPrevDocinfo && ( !bKeepSelectedAttrMva || ( bKeepSelectedAttrMva && dPrevAttrsMva.BitGet ( iAttr ) ) ) )
+						continue;
 
 					// store per-document MVAs
 					SphRange_t tFieldMva = pSource->IterateFieldMVAStart ( iAttr );
@@ -11736,59 +11792,39 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 			}
 
 			// store strings and JSON blobs
-			if ( pPrevDocinfo )
-			{
-				CSphRowitem * pPrevAttrs = DOCINFO2ATTRS ( pPrevDocinfo );
-				ARRAY_FOREACH ( i, dStringAttrs )
-				{
-					const CSphAttrLocator & tLoc = m_tSchema.GetAttr ( dStringAttrs[i] ).m_tLocator;
-					SphAttr_t uPrevOff = sphGetRowAttr ( pPrevAttrs, tLoc );
-					BYTE * pBase = pPrevIndex->m_tString.GetWritePtr();
-					if ( !uPrevOff || !pBase )
-						sphSetRowAttr ( pPrevAttrs, tLoc, 0 );
-					else
-					{
-						const BYTE * pStr = NULL;
-						int iLen = sphUnpackStr ( pBase+uPrevOff, &pStr );
-						if ( !iLen )
-							sphSetRowAttr ( pPrevAttrs, tLoc, 0 );
-						else
-						{
-							SphOffset_t uOff = tStrWriter.GetPos();
-							if ( uint64_t(uOff)>>32 )
-							{
-								m_sLastError.SetSprintf ( "too many string attributes (current index format allows up to 4 GB)" );
-								return 0;
-							}
-
-							sphSetRowAttr ( pPrevAttrs, tLoc, DWORD(uOff) );
-
-							BYTE dPackedLen[4];
-							int iLenLen = sphPackStrlen ( dPackedLen, iLen );
-							tStrWriter.PutBytes ( &dPackedLen, iLenLen );
-							tStrWriter.PutBytes ( pStr, iLen );
-						}
-					}
-				}
-			} else
 			{
 				ARRAY_FOREACH ( i, dStringAttrs )
 				{
 					// FIXME! optimize locators etc?
 					// FIXME! support binary strings w/embedded zeroes?
 					// get data, calc length
-					const char * sData = pSource->m_dStrAttrs[dStringAttrs[i]].cstr();
-					int iLen = sData ? strlen ( sData ) : 0;
+					int iStrAttr = dStringAttrs[i];
+					const CSphColumnInfo & tCol = m_tSchema.GetAttr ( iStrAttr );
+					bool bKeepPrevAttr = ( pPrevDocinfo && ( !bKeepSelectedAttrString || ( bKeepSelectedAttrString && dPrevAttrsString.BitGet ( iStrAttr ) ) ) );
+					const char * sData = NULL;
+					int iLen = 0;
+
+					if ( !bKeepPrevAttr )
+					{
+						sData = pSource->m_dStrAttrs[iStrAttr].cstr();
+						iLen = pSource->m_dStrAttrs[iStrAttr].Length();
+					} else
+					{
+						SphAttr_t uPrevOff = sphGetRowAttr ( DOCINFO2ATTRS ( pPrevDocinfo ), tCol.m_tLocator );
+						BYTE * pBase = pPrevIndex->m_tString.GetWritePtr();
+						if ( uPrevOff && pBase )
+							iLen = sphUnpackStr ( pBase+uPrevOff, (const BYTE **)&sData );
+					}
 
 					// no data
 					if ( !iLen )
 					{
-						pSource->m_tDocInfo.SetAttr ( m_tSchema.GetAttr ( dStringAttrs[i] ).m_tLocator, 0 );
+						pSource->m_tDocInfo.SetAttr ( tCol.m_tLocator, 0 );
 						continue;
 					}
 
 					// handle JSON
-					if ( m_tSchema.GetAttr ( dStringAttrs[i] ).m_eAttrType==SPH_ATTR_JSON ) // FIXME? optimize?
+					if ( tCol.m_eAttrType==SPH_ATTR_JSON && !bKeepPrevAttr ) // FIXME? optimize?
 					{
 						// WARNING, tricky bit
 						// flex lexer needs last two (!) bytes to be zeroes
@@ -11801,7 +11837,7 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 						if ( !sphJsonParse ( dBson, pData, g_bJsonAutoconvNumbers, g_bJsonKeynamesToLowercase, m_sLastError ) )
 						{
 							m_sLastError.SetSprintf ( "document " DOCID_FMT ", attribute %s: JSON error: %s",
-								pSource->m_tDocInfo.m_uDocID, m_tSchema.GetAttr ( dStringAttrs[i] ).m_sName.cstr(),
+								pSource->m_tDocInfo.m_uDocID, tCol.m_sName.cstr(),
 								m_sLastError.cstr() );
 
 							// bail?
@@ -11811,13 +11847,13 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 							// warn and ignore
 							sphWarning ( "%s", m_sLastError.cstr() );
 							m_sLastError = "";
-							pSource->m_tDocInfo.SetAttr ( m_tSchema.GetAttr ( dStringAttrs[i] ).m_tLocator, 0 );
+							pSource->m_tDocInfo.SetAttr ( tCol.m_tLocator, 0 );
 							continue;
 						}
 						if ( !dBson.GetLength() )
 						{
 							// empty SphinxBSON, need not save any data
-							pSource->m_tDocInfo.SetAttr ( m_tSchema.GetAttr ( dStringAttrs[i] ).m_tLocator, 0 );
+							pSource->m_tDocInfo.SetAttr ( tCol.m_tLocator, 0 );
 							continue;
 						}
 
@@ -11833,7 +11869,7 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 						m_sLastError.SetSprintf ( "too many string attributes (current index format allows up to 4 GB)" );
 						return 0;
 					}
-					pSource->m_tDocInfo.SetAttr ( m_tSchema.GetAttr ( dStringAttrs[i] ).m_tLocator, DWORD(uOff) );
+					pSource->m_tDocInfo.SetAttr ( tCol.m_tLocator, DWORD(uOff) );
 
 					// pack length, emit it, emit data
 					BYTE dPackedLen[4];
@@ -11964,9 +12000,38 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 				// store next entry
 				DOCINFOSETID ( pDocinfo, pSource->m_tDocInfo.m_uDocID );
 
-				// old docinfo found, use it instead of the new one
-				const DWORD * pSrc = pPrevDocinfo ? DOCINFO2ATTRS ( pPrevDocinfo ) : pSource->m_tDocInfo.m_pDynamic;
-				memcpy ( DOCINFO2ATTRS ( pDocinfo ), pSrc, sizeof(CSphRowitem)*m_tSchema.GetRowSize() );
+				CSphRowitem * pAttr = DOCINFO2ATTRS ( pDocinfo );
+				if ( !pPrevDocinfo )
+				{
+					memcpy ( pAttr, pSource->m_tDocInfo.m_pDynamic, sizeof(CSphRowitem)*m_tSchema.GetRowSize() );
+				} else
+				{
+					if ( !m_dKeepAttrs.GetLength() )
+					{
+						// copy whole row from old index
+						memcpy ( pAttr, DOCINFO2ATTRS ( pPrevDocinfo ), sizeof(CSphRowitem)*m_tSchema.GetRowSize() );
+
+						// copy some strings attributes
+						// 2nd stage - copy offsets from source, data already copied at string indexing
+						if ( dStringAttrs.GetLength() )
+							CopyRow ( pSource->m_tDocInfo.m_pDynamic, m_tSchema, dStringAttrs, pAttr );
+
+					} else
+					{
+						// copy new attributes, however keep some of them from old index
+						memcpy ( pAttr, pSource->m_tDocInfo.m_pDynamic, sizeof(CSphRowitem)*m_tSchema.GetRowSize() );
+
+						// copy some plain attributes
+						if ( dPrevAttrsPlain.GetLength() )
+							CopyRow ( DOCINFO2ATTRS ( pPrevDocinfo ), m_tSchema, dPrevAttrsPlain, pAttr );
+
+						// copy some strings attributes
+						// 2nd stage - copy offsets from source, data already copied at string indexing
+						if ( dStringAttrs.GetLength() )
+							CopyRow ( pSource->m_tDocInfo.m_pDynamic, m_tSchema, dStringAttrs, pAttr );
+					}
+				}
+
 				pDocinfo += iDocinfoStride;
 
 				// if not inlining, flush buffer if it's full
@@ -12129,7 +12194,11 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 	///////////////////////////////////////
 	// collect and sort multi-valued attrs
 	///////////////////////////////////////
-	if ( !BuildMVA ( dSources, dHits, iHitsMax*sizeof(CSphWordHit), fdTmpFieldMVAs.GetFD (), nFieldMVAs, iMaxPoolFieldMVAs, pPrevIndex.Ptr() ) )
+	const CSphBitvec * pPrevAttrsMva = NULL;
+	if ( bKeepSelectedAttrMva )
+		pPrevAttrsMva = &dPrevAttrsMva;
+
+	if ( !BuildMVA ( dSources, dHits, iHitsMax*sizeof(CSphWordHit), fdTmpFieldMVAs.GetFD (), nFieldMVAs, iMaxPoolFieldMVAs, pPrevIndex.Ptr(), pPrevAttrsMva ) )
 		return 0;
 
 	// reset persistent mva update pool
@@ -15492,10 +15561,32 @@ void CSphIndex_VLN::DebugDumpHeader ( FILE * fp, const char * sHeaderName, bool 
 			fprintf ( fp, "\thtml_index_attrs = %s\n", m_tSettings.m_sHtmlIndexAttrs.cstr () );
 		if ( !m_tSettings.m_sHtmlRemoveElements.IsEmpty() )
 			fprintf ( fp, "\thtml_remove_elements = %s\n", m_tSettings.m_sHtmlRemoveElements.cstr () );
-		if ( m_tSettings.m_sZones.cstr() )
+		if ( !m_tSettings.m_sZones.IsEmpty() )
 			fprintf ( fp, "\tindex_zones = %s\n", m_tSettings.m_sZones.cstr() );
 		if ( m_tSettings.m_bIndexFieldLens )
 			fprintf ( fp, "\tindex_field_lengths = 1\n" );
+		if ( m_tSettings.m_bIndexSP )
+			fprintf ( fp, "\tindex_sp = 1\n" );
+		if ( m_tSettings.m_iBoundaryStep!=0 )
+			fprintf ( fp, "\tphrase_boundary_step = %d\n", m_tSettings.m_iBoundaryStep );
+		if ( m_tSettings.m_iStopwordStep!=1 )
+			fprintf ( fp, "\tstopword_step = %d\n", m_tSettings.m_iStopwordStep );
+		if ( m_tSettings.m_iOvershortStep!=1 )
+			fprintf ( fp, "\tovershort_step = %d\n", m_tSettings.m_iOvershortStep );
+		if ( m_tSettings.m_eBigramIndex!=SPH_BIGRAM_NONE )
+			fprintf ( fp, "\tbigram_index = %s\n", sphBigramName ( m_tSettings.m_eBigramIndex ) );
+		if ( !m_tSettings.m_sBigramWords.IsEmpty() )
+			fprintf ( fp, "\tbigram_freq_words = %s\n", m_tSettings.m_sBigramWords.cstr() );
+		if ( !m_tSettings.m_sRLPContext.IsEmpty() )
+			fprintf ( fp, "\trlp_context = %s\n", m_tSettings.m_sRLPContext.cstr() );
+		if ( !m_tSettings.m_sIndexTokenFilter.IsEmpty() )
+			fprintf ( fp, "\tindex_token_filter = %s\n", m_tSettings.m_sIndexTokenFilter.cstr() );
+
+
+		CSphFieldFilterSettings tFieldFilter;
+		GetFieldFilterSettings ( tFieldFilter );
+		ARRAY_FOREACH ( i, tFieldFilter.m_dRegexps )
+			fprintf ( fp, "\tregexp_filter = %s\n", tFieldFilter.m_dRegexps[i].cstr() );
 
 		if ( m_pTokenizer )
 		{
@@ -15503,7 +15594,8 @@ void CSphIndex_VLN::DebugDumpHeader ( FILE * fp, const char * sHeaderName, bool 
 			fprintf ( fp, "\tcharset_type = %s\n", ( tSettings.m_iType==TOKENIZER_UTF8 || tSettings.m_iType==TOKENIZER_NGRAM )
 					? "utf-8"
 					: "unknown tokenizer (deprecated sbcs?)" );
-			fprintf ( fp, "\tcharset_table = %s\n", tSettings.m_sCaseFolding.cstr () );
+			if ( !tSettings.m_sCaseFolding.IsEmpty() )
+				fprintf ( fp, "\tcharset_table = %s\n", tSettings.m_sCaseFolding.cstr () );
 			if ( tSettings.m_iMinWordLen>1 )
 				fprintf ( fp, "\tmin_word_len = %d\n", tSettings.m_iMinWordLen );
 			if ( tSettings.m_iNgramLen && !tSettings.m_sNgramChars.IsEmpty() )
@@ -15539,6 +15631,8 @@ void CSphIndex_VLN::DebugDumpHeader ( FILE * fp, const char * sHeaderName, bool 
 			}
 			if ( tSettings.m_iMinStemmingLen>1 )
 				fprintf ( fp, "\tmin_stemming_len = %d\n", tSettings.m_iMinStemmingLen );
+			if ( tSettings.m_bStopwordsUnstemmed )
+				fprintf ( fp, "\tstopwords_unstemmed = 1\n" );
 		}
 
 		fprintf ( fp, "}\n" );
@@ -15587,6 +15681,19 @@ void CSphIndex_VLN::DebugDumpHeader ( FILE * fp, const char * sHeaderName, bool 
 	fprintf ( fp, "html-index-attrs: %s\n", m_tSettings.m_sHtmlIndexAttrs.cstr () );
 	fprintf ( fp, "html-remove-elements: %s\n", m_tSettings.m_sHtmlRemoveElements.cstr () );
 	fprintf ( fp, "index-zones: %s\n", m_tSettings.m_sZones.cstr() );
+	fprintf ( fp, "index-field-lengths: %d\n", m_tSettings.m_bIndexFieldLens ? 1 : 0 );
+	fprintf ( fp, "index-sp: %d\n", m_tSettings.m_bIndexSP ? 1 : 0 );
+	fprintf ( fp, "phrase-boundary-step: %d\n", m_tSettings.m_iBoundaryStep );
+	fprintf ( fp, "stopword-step: %d\n", m_tSettings.m_iStopwordStep );
+	fprintf ( fp, "overshort-step: %d\n", m_tSettings.m_iOvershortStep );
+	fprintf ( fp, "bigram-index: %s\n", sphBigramName ( m_tSettings.m_eBigramIndex ) );
+	fprintf ( fp, "bigram-freq-words: %s\n", m_tSettings.m_sBigramWords.cstr() );
+	fprintf ( fp, "rlp-context: %s\n", m_tSettings.m_sRLPContext.cstr() );
+	fprintf ( fp, "index-token-filter: %s\n", m_tSettings.m_sIndexTokenFilter.cstr() );
+	CSphFieldFilterSettings tFieldFilter;
+	GetFieldFilterSettings ( tFieldFilter );
+	ARRAY_FOREACH ( i, tFieldFilter.m_dRegexps )
+		fprintf ( fp, "regexp-filter: %s\n", tFieldFilter.m_dRegexps[i].cstr() );
 
 	if ( m_pTokenizer )
 	{
@@ -15601,8 +15708,8 @@ void CSphIndex_VLN::DebugDumpHeader ( FILE * fp, const char * sHeaderName, bool 
 		fprintf ( fp, "tokenizer-ignore-chars: %s\n", tSettings.m_sIgnoreChars.cstr () );
 		fprintf ( fp, "tokenizer-blend-chars: %s\n", tSettings.m_sBlendChars.cstr () );
 		fprintf ( fp, "tokenizer-blend-mode: %s\n", tSettings.m_sBlendMode.cstr () );
+		fprintf ( fp, "tokenizer-blend-mode: %s\n", tSettings.m_sBlendMode.cstr () );
 
-		fprintf ( fp, "tokenizer-exceptions: %s\n", tSettings.m_sSynonymsFile.cstr () );
 		fprintf ( fp, "dictionary-embedded-exceptions: %d\n", tEmbeddedFiles.m_bEmbeddedSynonyms ? 1 : 0 );
 		if ( tEmbeddedFiles.m_bEmbeddedSynonyms )
 		{
@@ -15636,18 +15743,11 @@ void CSphIndex_VLN::DebugDumpHeader ( FILE * fp, const char * sHeaderName, bool 
 		}
 
 		fprintf ( fp, "min-stemming-len: %d\n", tSettings.m_iMinStemmingLen );
+		fprintf ( fp, "stopwords-unstemmed: %d\n", tSettings.m_bStopwordsUnstemmed ? 1 : 0 );
 	}
 
 	fprintf ( fp, "killlist-size: %u\n", 0 );
 	fprintf ( fp, "min-max-index: " INT64_FMT "\n", m_iMinMaxIndex );
-
-	if ( m_pFieldFilter )
-	{
-		CSphFieldFilterSettings tSettings;
-		m_pFieldFilter->GetSettings ( tSettings );
-		ARRAY_FOREACH ( i, tSettings.m_dRegexps )
-			fprintf ( fp, "field-filter-regexp [%d]: %s\n", i, tSettings.m_dRegexps[i].cstr() );
-	}
 }
 
 
@@ -15947,7 +16047,7 @@ bool CSphIndex_VLN::Prealloc ( bool bStripPath )
 
 	bool bPersistMVA = sphIsReadable ( GetIndexFileName("mvp").cstr() );
 	bool bNoMinMax = ( m_uVersion<20 );
-	if ( bPersistMVA || bNoMinMax )
+	if ( ( bPersistMVA || bNoMinMax ) && !m_bDebugCheck )
 	{
 		sphLogDebug ( "'%s' forced to read data at prealloc (persist MVA = %d, no min-max = %d)", m_sIndexName.cstr(), (int)bPersistMVA, (int)bNoMinMax );
 		Preread();
@@ -16369,6 +16469,7 @@ void CSphIndex_VLN::GetSuggest ( const SuggestArgs_t & tArgs, SuggestResult_t & 
 
 	assert ( !tRes.m_pWordReader );
 	tRes.m_pWordReader = new KeywordsBlockReader_c ( m_tWordlist.m_tBuf.GetWritePtr(), m_tWordlist.m_bHaveSkips );
+	tRes.m_bHasExactDict = m_tSettings.m_bIndexExactWords;
 
 	sphGetSuggest ( &m_tWordlist, m_tWordlist.m_iInfixCodepointBytes, tArgs, tRes );
 
@@ -16674,7 +16775,7 @@ bool CSphIndex_VLN::DoGetKeywords ( CSphVector <CSphKeywordInfo> & dKeywords,
 	if ( m_pFieldFilter && szQuery )
 	{
 		pFieldFilter = m_pFieldFilter->Clone();
-		if ( pFieldFilter->Apply ( sModifiedQuery, strlen ( (char*)sModifiedQuery ), dFiltered, true ) )
+		if ( pFieldFilter.Ptr() && pFieldFilter->Apply ( sModifiedQuery, strlen ( (char*)sModifiedQuery ), dFiltered, true ) )
 			sModifiedQuery = dFiltered.Begin();
 	}
 
@@ -17554,7 +17655,7 @@ static void TransformAotFilterKeyword ( XQNode_t * pNode, const XQKeyword_t & tK
 		// OPTIMIZE? forms that are not found will (?) get looked up again in the dict
 		char sBuf [ MAX_KEYWORD_BYTES ];
 		strncpy ( sBuf, tKeyword.m_sWord.cstr(), sizeof(sBuf) );
-		if ( pWordforms->ToNormalForm ( (BYTE*)sBuf, true ) )
+		if ( pWordforms->ToNormalForm ( (BYTE*)sBuf, true, false ) )
 		{
 			if ( !pNode->m_dWords.GetLength() )
 				pNode->m_dWords.Add ( tKeyword );
@@ -17586,7 +17687,7 @@ static void TransformAotFilterKeyword ( XQNode_t * pNode, const XQKeyword_t & tK
 		ARRAY_FOREACH ( i, dLemmas )
 		{
 			strncpy ( sBuf, dLemmas[i].cstr(), sizeof(sBuf) );
-			if ( pWordforms->ToNormalForm ( (BYTE*)sBuf, false ) )
+			if ( pWordforms->ToNormalForm ( (BYTE*)sBuf, false, false ) )
 				dLemmas[i] = sBuf;
 		}
 	}
@@ -17751,7 +17852,7 @@ bool CSphIndex_VLN::MultiQuery ( const CSphQuery * pQuery, CSphQueryResult * pRe
 	if ( m_pFieldFilter )
 	{
 		pFieldFilter = m_pFieldFilter->Clone();
-		if ( pFieldFilter->Apply ( sModifiedQuery, strlen ( (char*)sModifiedQuery ), dFiltered, true ) )
+		if ( pFieldFilter.Ptr() && pFieldFilter->Apply ( sModifiedQuery, strlen ( (char*)sModifiedQuery ), dFiltered, true ) )
 			sModifiedQuery = dFiltered.Begin();
 	}
 
@@ -19254,6 +19355,7 @@ int CSphIndex_VLN::DebugCheck ( FILE * fp )
 					bool bIsMvaCorrect = ( uLastMvaID<=uMvaID && uMvaID<=uLastID );
 					uLastMvaID = uMvaID;
 					bool bWasArena = false;
+					int iLastEmpty = INT_MAX;
 
 					// loop MVAs
 					ARRAY_FOREACH_COND ( iItem, dMvaItems, bIsMvaCorrect )
@@ -19262,13 +19364,18 @@ int CSphIndex_VLN::DebugCheck ( FILE * fp )
 						bool bArena = ( ( uSpaOffset & MVA_ARENA_FLAG )!=0 ) && !m_bArenaProhibit;
 						bWasArena |= bArena;
 
-						// zero offset means empty MVA in rt index
+						// zero offset means empty MVA in rt index, however plain index stores offset to zero length
 						if ( !uSpaOffset || bArena )
+						{
+							iLastEmpty = iItem;
 							continue;
+						}
 
-						if ( bWasArena )
+						// where also might be updated mva with zero length
+						if ( bWasArena || ( iLastEmpty==iItem-1 ) )
 							rdMva.SeekTo ( sizeof(DWORD)*uSpaOffset, READ_NO_SIZE_HINT );
 						bWasArena = false;
+						iLastEmpty = INT_MAX;
 
 						// check offset (index)
 						if ( uMvaID==uLastID && bIsSpaValid && rdMva.GetPos()!=int(sizeof(DWORD))*uSpaOffset )
@@ -19475,6 +19582,7 @@ int CSphIndex_VLN::DebugCheck ( FILE * fp )
 					iIndexEntry, uDocID, iBlock, uMinDocID, uMaxDocID ));
 
 			bool bIsFirstMva = true;
+			bool bWasArenaMva = false;
 
 			// check values vs blocks range
 			const DWORD * pSpaRow = DOCINFO2ATTRS ( dRow.Begin() );
@@ -19533,10 +19641,13 @@ int CSphIndex_VLN::DebugCheck ( FILE * fp )
 
 						SphAttr_t uOff = sphGetRowAttr ( pSpaRow, tCol.m_tLocator );
 						if ( !uOff || ( uOff & MVA_ARENA_FLAG )!=0 )
+						{
+							bWasArenaMva |= ( ( uOff & MVA_ARENA_FLAG )!=0 );
 							break;
+						}
 
 						SphDocID_t uMvaDocID = 0;
-						if ( bIsFirstMva )
+						if ( bIsFirstMva && !bWasArenaMva )
 						{
 							bIsFirstMva = false;
 							rdMva.SeekTo ( sizeof(DWORD) * uOff - sizeof(SphDocID_t), READ_NO_SIZE_HINT );
@@ -19549,7 +19660,7 @@ int CSphIndex_VLN::DebugCheck ( FILE * fp )
 						if ( uOff>=iMvaEnd )
 							break;
 
-						if ( uMvaDocID && uMvaDocID!=uDocID )
+						if ( uMvaDocID && uMvaDocID!=uDocID && !bWasArenaMva )
 						{
 							LOC_FAIL(( fp, "unexpected MVA docid (row=" INT64_FMT ", mvaattr=%d, expected=" DOCID_FMT ", got=" DOCID_FMT ", block=" INT64_FMT ", index=%u)",
 								iIndexEntry, iItem, uDocID, uMvaDocID, iBlock, (DWORD)uOff ));
@@ -19938,7 +20049,7 @@ bool CSphWordforms::IsEqual ( const CSphVector<CSphSavedFile> & dFiles )
 }
 
 
-bool CSphWordforms::ToNormalForm ( BYTE * pWord, bool bBefore ) const
+bool CSphWordforms::ToNormalForm ( BYTE * pWord, bool bBefore, bool bOnlyCheck ) const
 {
 	int * pIndex = m_dHash ( (char *)pWord );
 	if ( !pIndex )
@@ -19952,6 +20063,9 @@ bool CSphWordforms::ToNormalForm ( BYTE * pWord, bool bBefore ) const
 
 	if ( m_dNormalForms[*pIndex].m_sWord.IsEmpty() )
 		return false;
+
+	if ( bOnlyCheck )
+		return true;
 
 	strcpy ( (char *)pWord, m_dNormalForms[*pIndex].m_sWord.cstr() ); // NOLINT
 	return true;
@@ -20244,7 +20358,7 @@ int CSphTemplateDictTraits::AddMorph ( int iMorph )
 void CSphTemplateDictTraits::ApplyStemmers ( BYTE * pWord ) const
 {
 	// try wordforms
-	if ( !m_bDisableWordforms && m_pWordforms && m_pWordforms->ToNormalForm ( pWord, true ) )
+	if ( m_pWordforms && m_pWordforms->ToNormalForm ( pWord, true, m_bDisableWordforms ) )
 		return;
 
 	// check length
@@ -20256,8 +20370,8 @@ void CSphTemplateDictTraits::ApplyStemmers ( BYTE * pWord ) const
 				break;
 	}
 
-	if ( !m_bDisableWordforms && m_pWordforms && m_pWordforms->m_bHavePostMorphNF )
-		m_pWordforms->ToNormalForm ( pWord, false );
+	if ( m_pWordforms && m_pWordforms->m_bHavePostMorphNF )
+		m_pWordforms->ToNormalForm ( pWord, false, m_bDisableWordforms );
 }
 
 const CSphMultiformContainer * CSphTemplateDictTraits::GetMultiWordforms () const
@@ -23881,6 +23995,9 @@ static const BYTE * SkipPI ( const BYTE * s )
 
 void CSphHTMLStripper::Strip ( BYTE * sData ) const
 {
+	if ( !sData )
+		return;
+
 	const BYTE * s = sData;
 	BYTE * d = sData;
 	for ( ;; )
@@ -26733,7 +26850,7 @@ ISphHits * CSphSource_SQL::IterateJoinedHits ( CSphString & sError )
 // for static we define const pointer as alias to target function.
 
 #define F_DL(name) static decltype(&name) sph_##name = nullptr
-#define F_DR(name) static constexpr decltype(&name) sph_##name = &name
+#define F_DR(name) static decltype(&name) sph_##name = &name
 
 #if DL_MYSQL
 	#define MYSQL_F(name) F_DL(name)
@@ -29527,13 +29644,15 @@ CSphSource_BaseSV::ESphParseResult CSphSource_CSV::SplitColumns ( CSphString & s
 	int iColumns = m_dRemap.GetLength();
 	int iCol = 0;
 	int iColumnStart = m_iDataStart;
-	int iQuoteCount = 0;
-	int iQuoteStart = -1;
+	int iQuotPrev = -1;
 	int	iEscapeStart = -1;
 	const BYTE * s = m_dBuf.Begin() + m_iDataStart; // parse this line
 	BYTE * d = m_dBuf.Begin() + m_iDataStart; // do parsing in place
 	const BYTE * pEnd = m_dBuf.Begin() + m_iBufUsed; // until we reach the end of current buffer
 	m_iDocStart = m_iDataStart;
+	bool bOnlySpace = true;
+	bool bQuoted = false;
+	bool bHasQuot = false;
 
 	for ( ;; )
 	{
@@ -29541,22 +29660,24 @@ CSphSource_BaseSV::ESphParseResult CSphSource_CSV::SplitColumns ( CSphString & s
 
 		// move to next control symbol
 		while ( s<pEnd && *s && *s!=m_iDelimiter && *s!='"' && *s!='\\' && *s!='\r' && *s!='\n' )
+		{
+			bOnlySpace &= sphIsSpace ( *s );
 			*d++ = *s++;
+		}
 
 		if ( s<pEnd )
 		{
 			assert ( !*s || *s==m_iDelimiter || *s=='"' || *s=='\\' || *s=='\r' || *s=='\n' );
 			bool bNull = !*s;
 			bool bEOL = ( *s=='\r' || *s=='\n' );
-#ifndef NDEBUG
 			bool bDelimiter = ( *s==m_iDelimiter );
-#endif
 			bool bQuot = ( *s=='"' );
 			bool bEscape = ( *s=='\\' );
 			int iOff = s - m_dBuf.Begin();
 			bool bEscaped = ( iEscapeStart>=0 && iEscapeStart+1==iOff );
 
-			if ( bEscape || bEscaped ) // not quoted escape symbol
+			// escape symbol outside double quotation
+			if ( !bQuoted && !bDelimiter && ( bEscape || bEscaped ) )
 			{
 				if ( bEscaped ) // next to escape symbol proceed as regular
 				{
@@ -29569,33 +29690,49 @@ CSphSource_BaseSV::ESphParseResult CSphSource_CSV::SplitColumns ( CSphString & s
 				continue;
 			}
 
+			// double quote processing
 			// [ " ... " ]
 			// [ " ... "" ... " ]
 			// [ " ... """ ]
 			// [ " ... """" ... " ]
-			if ( bQuot || ( iQuoteCount%2 )==1 ) // quotation
+			// any symbol inside double quote proceed as regular
+			// but quoted quote proceed as regular symbol
+			if ( bQuot )
 			{
-				// order of operations with quotation counter and offset matter
-				if ( bQuot )
-					iQuoteCount++;
-
-				// any symbol inside quotation proceed as regular
-				// but not quotation itself
-				// but quoted quotation proceed as regular symbol or escaped quotation
-				bool bOdd = ( ( iQuoteCount%2 )==1 );
-				// regular symbol inside quotation or quoted quotation or escaped quotation
-				if ( bOdd && ( !bQuot || ( iQuoteStart!=-1 && iQuoteStart+1==iOff ) ) )
+				if ( bOnlySpace && iQuotPrev==-1 )
+				{
+					// enable double quote
+					bQuoted = true;
+					bHasQuot = true;
+				} else if ( bQuoted )
+				{
+					// close double quote on 2st quote symbol
+					bQuoted = false;
+				} else if ( bHasQuot && iQuotPrev!=-1 && iQuotPrev+1==iOff )
+				{
+					// escaped quote found, re-enable double quote and copy symbol itself
+					bQuoted = true;
+					*d++ = '"';
+				} else
+				{
 					*d++ = *s;
-				s++;
+				}
 
-				if ( bQuot )
-					iQuoteStart = iOff;
+				s++;
+				iQuotPrev = iOff;
+				continue;
+			}
+
+			if ( bQuoted )
+			{
+				*d++ = *s++;
 				continue;
 			}
 
 			int iLen = d - m_dBuf.Begin() - iColumnStart;
 			assert ( iLen>=0 );
-			m_dColumnsLen[iCol] = iLen;
+			if ( iCol<m_dColumnsLen.GetLength() )
+				m_dColumnsLen[iCol] = iLen;
 			*d++ = '\0';
 			s++;
 			iCol++;
@@ -29615,6 +29752,10 @@ CSphSource_BaseSV::ESphParseResult CSphSource_CSV::SplitColumns ( CSphString & s
 			assert ( bDelimiter );
 			// column separator found
 			iColumnStart = d - m_dBuf.Begin();
+			bOnlySpace = true;
+			bQuoted = false;
+			bHasQuot = false;
+			iQuotPrev = -1;
 			continue;
 		}
 
@@ -29634,7 +29775,8 @@ CSphSource_BaseSV::ESphParseResult CSphSource_CSV::SplitColumns ( CSphString & s
 			iDstOff -= m_iDataStart;
 			iSrcOff -= m_iDataStart;
 			iColumnStart -= m_iDataStart;
-			iQuoteStart -= m_iDataStart;
+			if ( iQuotPrev!=-1 )
+				iQuotPrev -= m_iDataStart;
 			iEscapeStart -= m_iDataStart;
 			m_iDataStart = 0;
 			m_iDocStart = 0;
@@ -29655,9 +29797,16 @@ CSphSource_BaseSV::ESphParseResult CSphSource_CSV::SplitColumns ( CSphString & s
 				return CSphSource_BaseSV::DATA_OVER;
 			}
 
-			// error in case no data left in middle of data stream
-			sError.SetSprintf ( "source '%s': read error '%s' (line=%d, docid=" DOCID_FMT ")",
-				m_tSchema.m_sName.cstr(), strerror(errno), m_iLine, m_tDocInfo.m_uDocID );
+			if ( iCol!=iColumns )
+			{
+				sError.SetSprintf ( "source '%s': not all columns found (found=%d, total=%d, line=%d, docid=" DOCID_FMT ", error='%s')",
+					m_tSchema.m_sName.cstr(), iCol, iColumns, m_iLine, m_tDocInfo.m_uDocID, strerror(errno) );
+			} else
+			{
+				// error in case no data left in middle of data stream
+				sError.SetSprintf ( "source '%s': read error '%s' (line=%d, docid=" DOCID_FMT ")",
+					m_tSchema.m_sName.cstr(), strerror(errno), m_iLine, m_tDocInfo.m_uDocID );
+			}
 			return CSphSource_BaseSV::PARSING_FAILED;
 		}
 		m_iBufUsed += iGot;
@@ -30928,7 +31077,9 @@ void SuggestMatchWords ( const ISphWordlistSuggest * pWordlist, const CSphVector
 	int iLastBad = 0;
 	bool bSorted = true;
 	const bool bMergeWords = tRes.m_bMergeWords;
+	const bool bHasExactDict = tRes.m_bHasExactDict;
 	const int iMaxEdits = tArgs.m_iMaxEdits;
+	const bool bNonCharAllowed = tArgs.m_bNonCharAllowed;
 	tRes.m_dMatched.Reserve ( iQLen * 2 );
 	CmpSuggestOrder_fn fnCmp;
 
@@ -30943,6 +31094,18 @@ void SuggestMatchWords ( const ISphWordlistSuggest * pWordlist, const CSphVector
 			const char * sDictWord = tWord.m_sWord;
 			int iDictWordLen = tWord.m_iLen;
 			int iDictCodepoints = iDictWordLen;
+
+			// for stemmer \ lematizer suggest should match only original words
+			if ( bHasExactDict && sDictWord[0]!=MAGIC_WORD_HEAD_NONSTEMMED )
+				continue;
+
+			if ( bHasExactDict )
+			{
+				// skip head MAGIC_WORD_HEAD_NONSTEMMED char
+				sDictWord++;
+				iDictWordLen--;
+				iDictCodepoints--;
+			}
 
 			if_const ( SINGLE_BYTE_CHAR )
 			{
@@ -30959,7 +31122,9 @@ void SuggestMatchWords ( const ISphWordlistSuggest * pWordlist, const CSphVector
 			{
 				dCharOffset[iChars] = s - (const BYTE *)sDictWord;
 				int iCode = sphUTF8Decode ( s );
-				bGotNonChar = ( iCode<'A' || ( iCode>'Z' && iCode<'a' ) ); // skip words with any numbers or special characters
+				if ( !bNonCharAllowed )
+					bGotNonChar = ( iCode<'A' || ( iCode>'Z' && iCode<'a' ) ); // skip words with any numbers or special characters
+
 				if_const ( !SINGLE_BYTE_CHAR )
 				{
 					dDictWordCodepoints[iChars] = iCode;

@@ -252,16 +252,19 @@ class NetOutputBuffer_c : public ISphOutputBuffer
 public:
 	explicit	NetOutputBuffer_c ( int iSock );
 
-	virtual void	Flush ();
-	virtual bool	GetError () const { return m_bError; }
-	virtual int		GetSentCount () const { return m_iSent; }
-	virtual void	SetProfiler ( CSphQueryProfile * pProfiler ) { m_pProfile = pProfiler; }
+	virtual void	Flush () override;
+	virtual bool	GetError () const override { return m_bError; }
+	virtual int		GetSentCount () const override { return m_iSent; }
+	virtual void	SetProfiler ( CSphQueryProfile * pProfiler ) override { m_pProfile = pProfiler; }
+	const char*		GetErrorMsg () const;
 
 private:
 	CSphQueryProfile *	m_pProfile;
 	int			m_iSock;			///< my socket
 	int			m_iSent;
 	bool		m_bError;
+	CSphString	m_sError;
+
 };
 
 
@@ -463,17 +466,54 @@ struct QueryStatRecord_t
 };
 
 
-class QueryStatContainer_c
+class QueryStatContainer_i
 {
 public:
-	void								Add ( uint64_t uFoundRows, uint64_t uQueryTime, uint64_t uTimestamp );
-	int									GetNumRecords() const;
-	const QueryStatRecord_t &			GetRecord ( int iRecord ) const;
+	virtual void						Add ( uint64_t uFoundRows, uint64_t uQueryTime, uint64_t uTimestamp ) = 0;
+	virtual void						GetRecord ( int iRecord, QueryStatRecord_t & tRecord ) const = 0;
+	virtual int							GetNumRecords() const = 0;
+};
 
+
+class QueryStatContainer_c : public QueryStatContainer_i
+{
+public:
+	virtual void						Add ( uint64_t uFoundRows, uint64_t uQueryTime, uint64_t uTimestamp ) override;
+	virtual void						GetRecord ( int iRecord, QueryStatRecord_t & tRecord ) const override;
+	virtual int							GetNumRecords() const override;
+
+	QueryStatContainer_c();
+	QueryStatContainer_c ( QueryStatContainer_c && tOther );
+	QueryStatContainer_c & operator= ( QueryStatContainer_c && tOther );
+	
 private:
 	CircularBuffer_T<QueryStatRecord_t>	m_dRecords;
 };
 
+
+#ifndef NDEBUG
+class QueryStatContainerExact_c : public QueryStatContainer_i
+{
+public:
+	virtual void						Add ( uint64_t uFoundRows, uint64_t uQueryTime, uint64_t uTimestamp );
+	virtual void						GetRecord ( int iRecord, QueryStatRecord_t & tRecord ) const;
+	virtual int							GetNumRecords() const;
+
+	QueryStatContainerExact_c();
+	QueryStatContainerExact_c ( QueryStatContainerExact_c && tOther );
+	QueryStatContainerExact_c & operator= ( QueryStatContainerExact_c && tOther );
+
+private:
+	struct QueryStatRecordExact_t
+	{
+		uint64_t	m_uQueryTime;
+		uint64_t	m_uFoundRows;
+		uint64_t	m_uTimestamp;
+	};
+
+	CircularBuffer_T<QueryStatRecordExact_t> m_dRecords;
+};
+#endif
 
 struct ServedDesc_t
 {
@@ -505,12 +545,24 @@ public:
 	
 	void				AddQueryStat ( uint64_t uFoundRows, uint64_t uQueryTime );
 	void				CalculateQueryStats ( QueryStats_t & tRowsFoundStats, QueryStats_t & tQueryTimeStats ) const;
+#ifndef NDEBUG
+	void				CalculateQueryStatsExact ( QueryStats_t & tRowsFoundStats, QueryStats_t & tQueryTimeStats ) const;
+#endif
+
+	ServedStats_c &		operator = ( const ServedStats_c & rhs );
+	ServedStats_c &		operator = ( ServedStats_c && rhs );
 
 protected:
-	mutable CSphRwlock	m_tStatsLock;
+	virtual void		LockStats ( bool /*bReader*/ ) const {};
+	virtual void		UnlockStats() const {};
 
 private:
 	QueryStatContainer_c m_tQueryStatRecords;
+
+#ifndef NDEBUG
+	QueryStatContainerExact_c m_tQueryStatRecordsExact;
+#endif
+
 	TDigest_i *			m_pQueryTimeDigest;
 	TDigest_i *			m_pRowsFoundDigest;
 
@@ -524,7 +576,9 @@ private:
 
 	uint64_t			m_uTotalQueries;
 
-	void				CalcStatsForInterval ( QueryStatElement_t & tRowResult, QueryStatElement_t & tTimeResult, uint64_t uTimestamp, uint64_t uInterval ) const;
+	void				Reset();
+	void				CalcStatsForInterval ( const QueryStatContainer_i * pContainer, QueryStatElement_t & tRowResult, QueryStatElement_t & tTimeResult, uint64_t uTimestamp, uint64_t uInterval ) const;
+	void				DoStatCalcStats ( const QueryStatContainer_i * pContainer, QueryStats_t & tRowsFoundStats, QueryStats_t & tQueryTimeStats ) const;
 };
 
 
@@ -534,14 +588,19 @@ public:
 	ServedIndex_c () {}
 	~ServedIndex_c ();
 
-	void				ReadLock () const;
-	void				WriteLock () const;
-	void				Unlock () const;
+	void				ReadLock () const ACQUIRE_SHARED( m_tLock );
+	void				WriteLock () const ACQUIRE( m_tLock );
+	void				Unlock () const UNLOCK_FUNCTION( m_tLock );
 
 	bool				InitLock () const;
 
+protected:
+	virtual void		LockStats ( bool bReader ) const;
+	virtual void		UnlockStats() const;
+
 private:
 	mutable CSphRwlock	m_tLock;
+	mutable CSphRwlock	m_tStatsLock;
 };
 
 /// global index hash
@@ -568,16 +627,16 @@ public:
 	bool					Add ( const ServedDesc_t & tDesc, const CSphString & tKey );
 	bool					Delete ( const CSphString & tKey );
 
-	ServedIndex_c *			GetRlockedEntry ( const CSphString & tKey ) const;
-	ServedIndex_c *			GetWlockedEntry ( const CSphString & tKey ) const;
-	ServedIndex_c &			GetUnlockedEntry ( const CSphString & tKey ) const;
-	ServedIndex_c *			GetUnlockedEntryPtr ( const CSphString & tKey ) const;
+	ServedIndex_c *			GetRlockedEntry ( const CSphString & tKey ) const EXCLUDES (m_tLock);
+	ServedIndex_c *			GetWlockedEntry ( const CSphString & tKey ) const EXCLUDES (m_tLock);
+	ServedIndex_c &			GetUnlockedEntry ( const CSphString & tKey ) const EXCLUDES ( m_tLock );
+	ServedIndex_c *			GetUnlockedEntryPtr ( const CSphString & tKey ) const EXCLUDES ( m_tLock );
 	bool					Exists ( const CSphString & tKey ) const;
 
 protected:
-	void					Rlock () const;
-	void					Wlock () const;
-	void					Unlock () const;
+	void					Rlock () const ACQUIRE_SHARED( m_tLock );
+	void					Wlock () const ACQUIRE( m_tLock );
+	void					Unlock () const UNLOCK_FUNCTION ( m_tLock );
 
 private:
 	mutable CSphRwlock		m_tLock;
@@ -766,7 +825,7 @@ struct AggrResult_t : CSphQueryResult
 	CSphVector<int>					m_dMatchCounts;		///< aggregated result sets lengths (for schema minimization)
 	CSphVector<const CSphIndex*>	m_dLockedAttrs;		///< indexes which are hold in the memory until sending result
 	CSphTaggedVector				m_dTag2Pools;		///< tag to MVA and strings storage pools mapping
-	CSphString						m_sZeroCountName;
+	CSphVector<CSphString>			m_dZeroCount;
 
 	AggrResult_t () {}
 	virtual ~AggrResult_t () {}

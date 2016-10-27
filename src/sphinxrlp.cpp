@@ -42,7 +42,6 @@ int						g_iRLPMaxBatchSize		= 51200;
 int						g_iRLPMaxBatchDocs		= 50;
 
 BT_RLP_EnvironmentC *	g_pRLPEnv = NULL;
-int						g_iRLPEnvRefCount = 0;
 
 
 static void RLPLog ( void *, int iChannel, const char * szMessage )
@@ -95,20 +94,15 @@ static bool sphRLPInit ( const char * szRootPath, const char * szEnvPath, CSphSt
 		}
 	}
 
-	g_iRLPEnvRefCount++;
 	return true;
 }
 
 
-static void sphRLPFree ()
+void sphRLPDone ()
 {
-	g_iRLPEnvRefCount--;
-	if ( !g_iRLPEnvRefCount )
-	{
-		assert ( g_pRLPEnv );
-		BT_RLP_Environment_Destroy ( g_pRLPEnv );
-		g_pRLPEnv = NULL;
-	}
+	assert ( g_pRLPEnv );
+	BT_RLP_Environment_Destroy ( g_pRLPEnv );
+	g_pRLPEnv = NULL;
 }
 
 
@@ -116,13 +110,13 @@ class CSphRLPPreprocessor
 {
 public:
 	CSphRLPPreprocessor ( const char * szRootPath, const char * szEnvPath, const char * szCtxPath )
-		: m_pContext ( NULL )
+		: m_sRootPath ( szRootPath )
+		, m_sEnvPath ( szEnvPath )
+		, m_sCtxPath ( szCtxPath )
+		, m_pContext ( NULL )
 		, m_pFactory ( NULL )
 		, m_pTokenIterator ( NULL )
 		, m_iNextCompoundComponent ( -1 )
-		, m_sRootPath ( szRootPath )
-		, m_sEnvPath ( szEnvPath )
-		, m_sCtxPath ( szCtxPath )
 		, m_bInitialized ( false )
 	{
 		sphUTF8Encode ( m_pMarkerChunkSeparator, PROXY_CHUNK_SEPARATOR );
@@ -138,8 +132,6 @@ public:
 
 		if ( m_pContext )
 			BT_RLP_Environment_DestroyContext ( g_pRLPEnv, m_pContext );
-
-		sphRLPFree();
 	}
 
 	bool Init ( CSphString & sError )
@@ -537,7 +529,11 @@ ISphFieldFilter * CSphFieldFilterRLP::Clone()
 		pClonedParent = m_pParent->Clone();
 
 	CSphString sError;
-	return sphCreateRLPFilter ( pClonedParent, m_sRootPath.cstr(), m_sEnvPath.cstr(), m_sCtxPath.cstr(), m_sBlendChars.cstr(), sError );
+	ISphFieldFilter * pFilter = sphCreateRLPFilter ( pClonedParent, m_sRootPath.cstr(), m_sEnvPath.cstr(), m_sCtxPath.cstr(), m_sBlendChars.cstr(), sError );
+	if ( !pFilter )
+		sphWarning ( "RLP filter clone error '%s'", sError.cstr() );
+
+	return pFilter;
 }
 
 ISphFieldFilter * sphCreateRLPFilter ( ISphFieldFilter * pParent, const char * szRLPRoot, const char * szRLPEnv, const char * szRLPCtx, const char * szBlendChars, CSphString & sError )
@@ -618,6 +614,10 @@ bool sphSpawnRLPFilter ( ISphFieldFilter * &, const CSphIndexSettings &, const C
 }
 
 void sphConfigureRLP ( CSphConfigSection & )
+{
+}
+
+void sphRLPDone()
 {
 }
 
